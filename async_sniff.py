@@ -24,6 +24,7 @@ def sniff(
     refresh: check stop_event.set() every refresh seconds
     """
     s = conf.L2listen(type=ETH_P_ALL, *args, **kwargs)
+    #s = conf.L2listen(type=None, *args, **kwargs)
     lst = []
     try:
         while True:
@@ -39,9 +40,10 @@ def sniff(
                 if store:
                     lst.append(p)
                 if prn:
+                    #print("Summary of sniffed packet: " + str(p.summary())) 
                     r = prn(p)
-                    if r is not None:
-                        print(r)
+#                    if r is not None:
+                       # print(r)
     except KeyboardInterrupt:
         pass
     finally:

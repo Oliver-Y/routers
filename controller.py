@@ -3,28 +3,163 @@ from scapy.all import sendp
 from scapy.all import Packet, Ether, IP, ARP, Padding, IPv6 
 from async_sniff import sniff
 from cpu_metadata import CPUMetadata
-import time
-from ipaddress  import ip_network, ip_address
+from pwospf import Pwospf
+import time, threading 
+from ipaddress  import ip_network, ip_address, IPv4Address
 
 ARP_OP_REQ   = 0x0001
 ARP_OP_REPLY = 0x0002
+ALLSPFRouters = "224.0.0.5"
+HELLO_INT = 5
+TYPE_HELLO = 1 
+TYPE_LSU = 4 
+
+class OSPF_intfs(): 
+    def __init__(self,ip,subnet,helloint,router_id,area_id): 
+        self.ip = ip 
+        network = ip_network(subnet) 
+        self.subnet = network 
+        self.mask = network.netmask 
+        self.helloint = helloint 
+        self.router_id = router_id 
+        self.area_id = area_id
+        self.timers = {}  
+        self.flag = False  #Flag indicates if a change has been made
+        #Need to index this by Neighbor_ip? 
+    def __str__(self):
+        return (f"OSPF Interface:\n"
+                f"  IP Address: {self.ip}\n"
+                f"  Subnet: {self.subnet}\n"
+                f"  Subnet Mask: {self.mask}\n"
+                f"  Hello Interval: {self.helloint} seconds\n"
+                f" OSPF Timers: {self.timers}\n") 
+    def update_status(self,neighbor_id, neighbor_ip): 
+        if neighbor_ip in self.timers.keys(): 
+            timer,nid = self.timers[neighbor_ip] 
+            timer.cancel() 
+            timer = threading.Timer(3*self.helloint, self.timer_cb, args = [neighbor_ip]) 
+            self.timers[neighbor_ip] = (timer,nid)  
+            timer.start()
+        else: 
+            timer = threading.Timer(3*self.helloint,self.timer_cb, args = [neighbor_ip]) 
+            self.timers[neighbor_ip] = (timer,neighbor_id) 
+            self.timers[neighbor_ip][0].start() 
+            self.flag = True 
+        print(f"Intfs {self.subnet} --> {self.timers}") 
+
+    def timer_cb(self, neighbor_ip): 
+        print(f"Timeout on {neighbor_ip}") 
+        del self.timers[neighbor_ip] 
+        self.flag = True 
+
+    def lsu_needed(self): 
+        ret = self.flag 
+        self.flag = False 
+        return ret 
+
+    def build_packet(self,src_mac): 
+        l2_ether = Ether(src =src_mac, dst ="ff:ff:ff:ff:ff:ff") 
+        l2_cpumetadata = CPUMetadata(origEtherType=0x0800, srcPort = 1)
+        l3_ipv4 = IP(src=self.ip, dst=ALLSPFRouters) 
+        l3_ospf = Pwospf(type = TYPE_HELLO, router_id = self.router_id, area_id = self.area_id, mask = self.mask, helloint = self.helloint) 
+        hello_pkt = l2_ether / l2_cpumetadata/ l3_ipv4 / l3_ospf
+        #hello_pkt.show2() 
+        return hello_pkt 
+
+class RouteTable(): 
+    def __init__(self,sw): 
+        self.sw = sw 
+        self.route_table = {} 
+    def addEntry(self,ip,mask):
+        ip_int = int(ip_address(ip)) 
+        mask_int = int(ip_address(mask)) 
+        #TODO: assumption that we only work with /24 addresses 
+        priority = 1 if mask_int == 0xFFFFFF00 else 2
+        subnet = IPv4Address(ip_int & mask_int)
+        self.route_table[subnet] = ip 
+        print(f"{self.sw}: {subnet},{mask} --> {ip}") 
+        self.sw.insertTableEntry(
+            table_name="MyIngress.fwd_l3",
+            match_fields={"hdr.ipv4.dstAddr": [subnet,mask]},
+            action_name="MyIngress.set_dst_ip",
+            action_params={"next_hop":ip},
+            priority = priority,
+        )
+    def delEntry(self,subnet,mask): 
+        ip_int = int(ip_address(ip)) 
+        mask_int = int(ip_address(mask)) 
+        #TODO: assumption that we only work with /24 addresses 
+        priority = 1 if mask_int == 0xFFFFFF00 else 2
+        subnet = IPv4Address(ip_int & mask_int)
+        del self.route_table[subnet] 
+        print(f"{self.sw}: {subnet},{mask} --> {ip}") 
+        self.sw.removeTableEntry(
+            table_name="MyIngress.fwd_l3",
+            match_fields={"hdr.ipv4.dstAddr": [subnet,mask]},
+            action_name="MyIngress.set_dst_ip",
+            action_params={"next_hop":ip},
+            priority = priority,
+        )
+    def nextHop(self,ip): 
+        if ip in self.route_table.keys(): 
+            return ip 
+        for k,v in self.route_table.items(): 
+            if ip_address(ip) in ip_network(k): 
+                return v
+        return None
+
 
 class P4Controller(Thread):
-    def __init__(self, sw,ips, macs,subnets, intfs_mappings,start_wait=0.3):
+    def __init__(self,sw,ips,macs,subnets,intfs_mappings,router_id,area_id,lsuint=10,start_wait=0.3):
         super(P4Controller, self).__init__()
         self.sw = sw
         self.start_wait = start_wait # time to wait for the controller to be listenning
         self.iface = sw.intfs[1].name
+        #Data-plane tables 
         self.port_for_mac = {} #MAC --> PORT 
         self.arp = {} # IP --> MAC 
-        self.route_table = {} #IP --> IP(dist)  
+        #self.route_table = {} #IP/Mask --> IP(dist)  
+        self.routes = RouteTable(sw) 
         self.stop_event = Event()
-        self.ips = ips
+        #Control-plane datastructures
         self.macs = macs 
+        self.ips = ips
         self.intfs_mappings = intfs_mappings #Subnet --> (mac,IP) 
         self.subnets = subnets
         print(str(self.sw) + f" IP: {self.ips} \n Sub: {self.subnets}") 
         self.pktcache = [] 
+        #OSPF Router Vars
+        self.router_id = router_id 
+        self.area_id = area_id 
+        self.lsuint = lsuint #LinkState floods 
+        self.ospf_intfs = [] 
+        #OSPF interface variables --> for each interface mapping 
+        for k,v in self.intfs_mappings.items(): 
+            intfs = OSPF_intfs(v[1],k,HELLO_INT,self.router_id, self.area_id) 
+            self.ospf_intfs.append(intfs) 
+            #self.ospf_hello_cb(HELLO_INT,intfs) 
+        #TEST: DEMOING SECOND INTERFACE 
+        self.ospf_hello_cb(HELLO_INT,self.ospf_intfs[1],1) 
+        #self.ospf_lsu_cb(lsuint) 
+
+    #TODO: LSU FLOODS + HELLO 
+    def lsu_flood(self): 
+        pass 
+    def hello_send(self): 
+        #Construct Hello Packet 
+        pass 
+    def ospf_lsu_cb(self,interval): 
+        threading.Timer(interval,self.ospf_lsu_cb, args=[interval]).start() 
+        self.lsu_flood() 
+        print("OSPF Lsu\n") 
+    def ospf_hello_cb(self,interval,interface,interface_index): 
+        print(f"Hello_cb {self.sw}") 
+        threading.Timer(interval,self.ospf_hello_cb,args =[interval, interface, interface_index]).start() 
+        src_mac = self.macs[interface_index] 
+        pkt = interface.build_packet(src_mac) 
+        #print(f"OSPF Hello on {interface}\n") 
+        self.send(pkt) 
+    
     
     def addArpEntry(self, ip, mac): 
         if ip in self.arp.keys(): 
@@ -75,7 +210,7 @@ class P4Controller(Thread):
             send_packet = self.pktcache.pop(0) 
             send_packet[Ether].dst = pkt[Ether].dst 
         self.sw.printTableEntries()
-        send_packet.show2()
+        #send_packet.show2()
         self.send(send_packet)
 
     def handleArpRequest(self, pkt):
@@ -110,26 +245,21 @@ class P4Controller(Thread):
         #arp_request.show2() 
         self.send(arp_request)
 
-
     def mask(self,addr): 
         first_three_chunks = ".".join(addr.split(".")[:3])
         first_three_chunks += ".0" 
         return first_three_chunks 
 
     def handleIPNetwork(self,pkt): 
-       # if pkt[IP].dst == "10.0.0.2": 
-       #     return
-#        print("Switch: " + str(self.sw)) 
-#        print("Route Table: " + str(self.route_table))
-#        print("Arp Table: " + str(self.arp)) 
-#        print("Ports: " + str(self.port_for_mac)) 
-        next_hop = self.route_table[pkt[IP].dst] 
-#        print("Next Hop IP: " + str(next_hop)) 
+        next_hop = self.routes.nextHop(pkt[IP].dst) 
+        if next_hop == None: 
+            return
         if next_hop in self.arp.keys(): 
             dstMac = self.arp[next_hop] #arp lookup  
             outPort = self.port_for_mac[dstMac] #port lookup 
            # self.send(pkt) 
         else: 
+            #It'll always go here, should never go above? 
             self.send_ARP_Req(pkt,next_hop) 
 
     def handleIP(self,pkt): 
@@ -137,11 +267,41 @@ class P4Controller(Thread):
         srcPort = pkt[CPUMetadata].srcPort 
         dstIP = pkt[IP].dst  
         self.handleIPNetwork(pkt) 
+
+    def pwospf_drop(self,pkt): 
+        #Drop packets not in the right area and that are also not ourselves (this should never happen tho) 
+        return pkt[Pwospf].area_id != self.area_id or pkt[Pwospf].router_id == self.router_id 
+    def pwospf_lsu_flood(self): 
+        print("Lsu Flood") 
+        pass 
+
+    def handlePwospf_hello(self,pkt): 
+        if not self.pwospf_drop(pkt): 
+            incoming_ip = pkt[IP].src #Find the equivalent subnet 
+            nid = pkt[Pwospf].router_id
+            #print(f"Inncoming IP: {incoming_ip} \t Nid: {nid}")
+            for intfs in self.ospf_intfs: 
+                if ip_address(incoming_ip) in ip_network(intfs.subnet): 
+                    intfs.update_status(nid,incoming_ip) 
+                if intfs.lsu_needed(): 
+                    self.pwospf_lsu_flood() 
+        else: 
+            print("PWOSPF packet dropped") 
+
+
         
+    def handlePwospf(self,pkt): 
+        if pkt[Pwospf].type == TYPE_HELLO: 
+            self.handlePwospf_hello(pkt) 
+        elif pkt[Pwospf].type == TYPE_LSU: 
+            self.handlePwospf_hello(pkt) 
+        else: 
+            print("Faulty PWOSPF Packet") 
+
     def handlePkt(self, pkt):
-        if CPUMetadata not in pkt: return 
+        if CPUMetadata not in pkt: 
+            return 
         if pkt[CPUMetadata].fromCpu == 1: return
-        #pkt.show2() 
         if ARP in pkt:
             if pkt[ARP].op == ARP_OP_REQ:
                 print("ARP Req from: " + str(pkt[ARP].psrc) + "  On Switch: " + str(self.sw)) 
@@ -149,8 +309,12 @@ class P4Controller(Thread):
             elif pkt[ARP].op == ARP_OP_REPLY:
                 print("ARP RESP from: " + str(pkt[ARP].psrc) + "    On Switch: " + str(self.sw)) 
                 self.handleArpReply(pkt)
-        if IP in pkt: 
-            print("ip PACKET RECIEVED on" + str(self.sw))
+        if Pwospf in pkt: 
+            print("Pwospf on " + str(self.sw)) 
+            #pkt.show2()
+            self.handlePwospf(pkt) 
+        elif IP in pkt: 
+            print("IP on" + str(self.sw))
             self.handleIP(pkt) 
 
 

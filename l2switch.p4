@@ -147,6 +147,7 @@ parser MyParser(packet_in packet,
     }
 
     state parse_ip{
+        log_msg("Parsing IP"); 
         packet.extract(hdr.ipv4); 
         transition select(hdr.ipv4.dstAddr){
             ALLSPFRouters: parse_pwospf_header;   
@@ -155,6 +156,7 @@ parser MyParser(packet_in packet,
     }   
     
     state parse_pwospf_header{
+        log_msg("Parsing Pwospf_header"); 
         packet.extract(hdr.pwospf_head); 
         transition select(hdr.pwospf_head.type){
             PWOSPF_HELLO: parse_pwospf_hello; 
@@ -164,6 +166,7 @@ parser MyParser(packet_in packet,
 
 
    state parse_pwospf_hello{
+        log_msg("Parsing Pwospf_Hello"); 
         packet.extract(hdr.pwospf_hello); 
         transition accept; 
    }
@@ -205,6 +208,7 @@ control MyIngress(inout headers hdr,
     }
 
     action cpu_meta_encap(){
+        log_msg("Encap"); 
         hdr.cpu_metadata.setValid();
         hdr.cpu_metadata.origEtherType = hdr.ethernet.etherType;
         hdr.cpu_metadata.srcPort = (bit<16>)standard_metadata.ingress_port;
@@ -281,11 +285,17 @@ control MyIngress(inout headers hdr,
         if (standard_metadata.ingress_port == CPU_PORT){
             cpu_meta_decap();
         }
-        if(hdr.pwospf_head.isValid()){
-            log_msg("Pwospf"); 
-            send_to_cpu(); 
+        if(hdr.pwospf_hello.isValid()){
+            if(standard_metadata.ingress_port == CPU_PORT){
+                log_msg("send hello");  
+                fwd_l2.apply();  
+            }
+            else{
+                log_msg("got hello");  
+                send_to_cpu(); 
+            }
         }   
-        if(hdr.ipv4.isValid()){
+        else if(hdr.ipv4.isValid()){
             log_msg("ip detected"); 
             //First check to see if its a valid subnet. If not valid drop, otherwise, replace mac addresses based off of next hop IP 
             if(fwd_l3.apply().hit){
@@ -322,6 +332,10 @@ control MyDeparser(packet_out packet, in headers hdr) {
         packet.emit(hdr.cpu_metadata);
         packet.emit(hdr.arp);
         packet.emit(hdr.ipv4); 
+        packet.emit(hdr.pwospf_head); 
+        packet.emit(hdr.pwospf_hello); 
+        packet.emit(hdr.pwospf_lsu_head); 
+        packet.emit(hdr.pwospf_lsu_ads); 
     }
 }
 

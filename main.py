@@ -63,14 +63,16 @@ cpu2_rid = "0.0.0.2"
 cpu3_rid = "0.0.0.3" 
 
 cpu1 = P4Controller(s1,cpu1_ips,cpu1_macs,cpu1_subnets,cpu1_intfs_mappings,cpu1_rid,1) 
-#cpu2 = P4Controller(s2,cpu2_ips,cpu2_macs,cpu2_subnets,cpu2_intfs_mappings,2,1)  
+cpu2 = P4Controller(s2,cpu2_ips,cpu2_macs,cpu2_subnets,cpu2_intfs_mappings,cpu2_rid,1)  
 cpu3 = P4Controller(s3,cpu3_ips,cpu3_macs,cpu3_subnets,cpu3_intfs_mappings,cpu3_rid,1) 
 
 
-#cpu1.route_table["10.0.2.2"] = "10.0.3.2" 
+#Host Hops
 cpu1.routes.routes[("10.0.0.2",0xFFFFFFFF)] = "10.0.0.2" 
-cpu3.routes.routes[("10.0.2.2",0xFFFFFFFF)] = "10.0.2.2" 
 cpu1.routes.routes[("10.0.0.3",0xFFFFFFFF)] = "10.0.0.3" 
+cpu2.routes.routes[("10.0.1.2",0xFFFFFFFF)] = "10.0.1.2" 
+cpu2.routes.routes[("10.0.1.3",0xFFFFFFFF)] = "10.0.1.3" 
+cpu3.routes.routes[("10.0.2.2",0xFFFFFFFF)] = "10.0.2.2" 
 cpu3.routes.routes[("10.0.2.3",0xFFFFFFFF)] = "10.0.2.3" 
 #cpu3.route_table["10.0.0.2"] = "10.0.3.0" 
 #cpu1.route_table["10.0.0.3"] = "10.0.0.3" 
@@ -99,6 +101,21 @@ s1.insertTableEntry(
     action_params={"next_hop":"10.0.0.3"},
     priority = 1,
 )
+s2.insertTableEntry(
+    table_name="MyIngress.fwd_l3",
+    match_fields={"hdr.ipv4.dstAddr": ["10.0.1.2",mask2]},
+    action_name="MyIngress.set_dst_ip",
+    action_params={"next_hop":"10.0.1.2"},
+    priority = 1,
+)
+
+s2.insertTableEntry(
+    table_name="MyIngress.fwd_l3",
+    match_fields={"hdr.ipv4.dstAddr": ["10.0.1.3",mask2]},
+    action_name="MyIngress.set_dst_ip",
+    action_params={"next_hop":"10.0.1.3"},
+    priority = 1,
+)
 s3.insertTableEntry(
     table_name="MyIngress.fwd_l3",
     match_fields={"hdr.ipv4.dstAddr": ["10.0.2.2",mask2]},
@@ -125,7 +142,7 @@ s3.insertTableEntry(
 
 
 cpu1.start() 
-#cpu2.start()
+cpu2.start()
 cpu3.start()
 CLI(net) 
 net.stop()

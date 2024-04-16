@@ -104,8 +104,8 @@ class RouteTopology():
             mask = lsu_ad.mask 
             self.lsa[lsu_ad.router_id].append((subnet,mask)) 
             path = self.next_hop(subnet,mask) 
-            print(f"{self.sw} --> Path: {path} to {subnet}/{mask}") 
-            print(f"{self.sw} --> IPS: {self.ips}") 
+            #print(f"{self.sw} --> Path: {path} to {subnet}/{mask}") 
+            #print(f"{self.sw} --> IPS: {self.ips}") 
             if len(path) > 1: 
                 next_hop =self.id_to_ip[path[1]] 
                 mask = 0xFFFFFF00
@@ -114,7 +114,6 @@ class RouteTopology():
             lsu_ad = lsu_ad.payload 
 
         #print(f"{self.sw}: {self.lsa}") 
-
     def discover_node(self,rid,ip): 
         self.id_to_ip[rid] = ip 
         self.add_adj(rid) 
@@ -123,7 +122,6 @@ class RouteTopology():
         if (ip,mask) not in self.routes.keys(): 
             self.routes[(ip,mask)] = ip 
             subnet = str(ip_network(int(ip_address(ip)) & mask).network_address) 
-            print(f"{ip}, {subnet}, {mask}") 
             self.addRoute(ip,subnet,mask) 
 
     def drop_node(self,rid): 
@@ -147,7 +145,7 @@ class RouteTopology():
 
     def addRoute(self,ip,subnet,mask):
         priority = 1 if mask == 0xFFFFFF00 else 2
-        print(f"{self.sw}: {subnet},{mask} --> {ip}") 
+       # print(f"{self.sw}: {subnet},{mask} --> {ip}") 
         self.sw.insertTableEntry(
             table_name="MyIngress.fwd_l3",
             match_fields={"hdr.ipv4.dstAddr": [subnet,mask]},
@@ -179,18 +177,12 @@ class RouteTopology():
                 (current,path) = q.pop(0) 
                 if current not in visited: 
                     visited.add(current) 
-                    print(f"LSA {self.lsa}") 
                     if (subnet,mask) in self.lsa[current]: 
                         return path 
                     for neighbor in self.adj[current]: 
                         if neighbor not in visited: 
                             q.append((neighbor, path + [neighbor])) 
-
-        #returns a path of RID
         return bfs_shortest_path()
-
-
-
 
 class P4Controller(Thread):
     def __init__(self,sw,ips,macs,subnets,intfs_mappings,router_id,area_id,lsuint=10,start_wait=0.3):
@@ -221,15 +213,11 @@ class P4Controller(Thread):
         self.lsuint = lsuint #LinkState floods 
         self.ospf_intfs = [] 
         #OSPF interface variables --> for each interface mapping 
-        for k,v in self.intfs_mappings.items(): 
+        for i,(k,v) in enumerate(self.intfs_mappings.items()): 
             intfs = OSPF_intfs(v[1],k,HELLO_INT,self.router_id, self.area_id) 
             self.ospf_intfs.append(intfs) 
-            #self.ospf_hello_cb(HELLO_INT,intfs) 
-        #TEST: DEMOING SECOND INTERFACE 
-        self.ospf_hello_cb(HELLO_INT,self.ospf_intfs[1],1) 
-        #self.ospf_lsu_cb(lsuint) 
+            self.ospf_hello_cb(HELLO_INT,intfs,i) 
 
-    #TODO: LSU FLOODS + HELLO 
     def lsu_flood(self): 
         pass 
     def hello_send(self): 
@@ -240,11 +228,9 @@ class P4Controller(Thread):
         self.lsu_flood() 
         print("OSPF Lsu\n") 
     def ospf_hello_cb(self,interval,interface,interface_index): 
-        #print(f"Hello_cb {self.sw}") 
         threading.Timer(interval,self.ospf_hello_cb,args =[interval, interface, interface_index]).start() 
         src_mac = self.macs[interface_index] 
         pkt = interface.build_packet(src_mac) 
-        #print(f"OSPF Hello on {interface}\n") 
         self.send(pkt) 
     
     
@@ -282,7 +268,6 @@ class P4Controller(Thread):
         pkt[ARP].pdst = pkt[ARP].psrc
         pkt[ARP].hwsrc = self.intfs_mappings[subnet][0]
         pkt[ARP].psrc = self.intfs_mappings[subnet][1]
-        #This is the mess up line
         pkt[Ether].dst = pkt[Ether].src
         pkt[Ether].src = pkt[ARP].hwsrc 
 
@@ -294,16 +279,20 @@ class P4Controller(Thread):
             self.addArpEntry(src_ip,pkt[ARP].hwsrc) 
             self.addMacAddr(pkt[ARP].hwsrc, pkt[CPUMetadata].srcPort)
         if dst_ip in self.ips: 
+            if src_ip not in self.pktcache: #If the pkt has been popped already 
+                if src_ip not in self.arp.keys(): 
+                    print(f"Something went wrong {self.arp}") 
+                return 
             send_packet = self.pktcache[src_ip] #the original request src_ip 
             del self.pktcache[src_ip] 
             send_packet[Ether].dst = pkt[Ether].dst #This gets moved the source by the dataplane  
-        #self.sw.printTableEntries()
-        #send_packet.show2()
         self.send(send_packet)
 
     def handleArpRequest(self, pkt):
         dst_ip = pkt[ARP].pdst 
         src_ip = pkt[ARP].psrc 
+        if src_ip in self.ips: 
+            return 
         if src_ip not in self.arp.keys(): 
             self.addArpEntry(src_ip,pkt[ARP].hwsrc) 
             self.addMacAddr(pkt[ARP].hwsrc, pkt[CPUMetadata].srcPort)
@@ -312,8 +301,6 @@ class P4Controller(Thread):
         for s in self.subnets: 
             if ip_address(dst_ip) in ip_network(s): 
                 self.send(pkt) 
-                #print("Sending Pkt") 
-                #pkt.show2() 
                 return 
 
     def send_ARP_Req(self,pkt,ip):
@@ -344,15 +331,6 @@ class P4Controller(Thread):
         dst_ip = pkt[IP].dst 
         self.send_ARP_Req(pkt,dst_ip) 
 
-        #next_hop = self.routes.nextHop(pkt[IP].dst) 
-        #if next_hop in self.arp.keys(): 
-        #    dstMac = self.arp[next_hop] #arp lookup  
-        #    outPort = self.port_for_mac[dstMac] #port lookup 
-           # self.send(pkt) 
-       # else: 
-            #It'll always go here, should never go above? 
-#            self.send_ARP_Req(pkt,next_hop) 
-
     def handleIP(self,pkt): 
         #Check which subnet the dst address is in 
         srcPort = pkt[CPUMetadata].srcPort 
@@ -377,7 +355,6 @@ class P4Controller(Thread):
             l2 = Ether() 
             l2_cpumetadata = CPUMetadata(origEtherType=0x0800, srcPort = 1)
             l3 = IP(src = src_ip,dst = dst_ip,proto=89) 
-            #l3_pwospf_flood = Pwospf(type=TYPE_LSU,router_id = self.router_id, area_id = self.area_id, seq = self.host_seq, ttl = TTL_DEFAULT,num_ads = len(lsu_ads_pkt), advertisements = lsu_ads_pkt)
             l3_pwospf_flood = Pwospf(type=TYPE_LSU,router_id = self.router_id, area_id = self.area_id, seq = self.host_seq, ttl = TTL_DEFAULT,num_ads = len(lsu_ads_pkt), advertisements = lsu_ads_pkt)
             lsu_pkt = l2 / l2_cpumetadata / l3 / l3_pwospf_flood 
             if dst_ip not in self.arp.keys(): 
@@ -394,7 +371,6 @@ class P4Controller(Thread):
         if not self.pwospf_drop(pkt): 
             incoming_ip = pkt[IP].src #Find the equivalent subnet 
             rid = pkt[Pwospf].router_id
-            #print(f"Inncoming IP: {incoming_ip} \t Nid: {nid}")
             for intfs in self.ospf_intfs: 
                 if ip_address(incoming_ip) in ip_network(intfs.subnet): 
                     intfs.update_status(rid,incoming_ip) 
@@ -425,8 +401,7 @@ class P4Controller(Thread):
                 print("ARP RESP from: " + str(pkt[ARP].psrc) + "    On Switch: " + str(self.sw)) 
                 self.handleArpReply(pkt)
         if Pwospf in pkt: 
-            #print("Pwospf on " + str(self.sw)) 
-            #pkt.show2()
+           # print("PWOSPF on" + str(self.sw))
             self.handlePwospf(pkt) 
         elif IP in pkt: 
             print("IP on" + str(self.sw))

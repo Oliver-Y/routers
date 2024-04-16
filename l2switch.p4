@@ -303,6 +303,7 @@ control MyIngress(inout headers hdr,
             }
         }   
         else if(hdr.pwospf_lsu_head.isValid() && standard_metadata.ingress_port != CPU_PORT){
+            //Always send LSU up to the CPU. If the CPU sends it back that just means 
             log_msg("got lsu");  
             send_to_cpu(); 
         }

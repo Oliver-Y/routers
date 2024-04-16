@@ -92,6 +92,9 @@ class RouteTopology():
             return True 
         self.seq_num[rid] = pkt[Pwospf].seq 
         return False 
+
+
+    #TODO: if change is detected in LSU, send LSU flood?
     def lsu_update(self,pkt): 
         rid = pkt[Pwospf].router_id 
         if self.check_seq(pkt): 
@@ -102,7 +105,9 @@ class RouteTopology():
         for i in range(0,lsu_num): 
             subnet = lsu_ad.subnet 
             mask = lsu_ad.mask 
-            self.lsa[lsu_ad.router_id].append((subnet,mask)) 
+            #Only append if not redundant. 
+            if (subnet,mask) not in self.lsa[lsu_ad.router_id]: 
+                self.lsa[lsu_ad.router_id].append((subnet,mask)) 
             path = self.next_hop(subnet,mask) 
             #print(f"{self.sw} --> Path: {path} to {subnet}/{mask}") 
             #print(f"{self.sw} --> IPS: {self.ips}") 
@@ -343,6 +348,11 @@ class P4Controller(Thread):
 
     def pwospf_lsu_flood(self): 
         neighbor_routers = self.routes.adj[self.router_id] 
+        #TODO: LSU_ads here needs to be the entire table not just your own
+        lsu_ads = [] 
+        for rid in self.routes.lsa: 
+            for v in self.routes.lsa[rid]: 
+                lsu_ads.append(v) 
         lsu_ads = self.routes.lsa[self.router_id] 
         lsu_ads_pkt = [LinkStateAdvertisement(subnet = s, mask = m, router_id = self.router_id) for s,m in lsu_ads] 
         for n in neighbor_routers: 

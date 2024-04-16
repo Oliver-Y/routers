@@ -1,4 +1,4 @@
-from scapy.fields import ByteField, ShortField, XIntField, LongField, ConditionalField, IPField, FieldListField 
+from scapy.fields import ByteField, ShortField, XIntField, LongField, ConditionalField, IPField, FieldListField, PacketListField 
 from scapy.all import Packet, IP
 from scapy.packet import bind_layers
 #from scapy.all import Packet, Ether, IP, ARP, Padding, IPv6 
@@ -18,7 +18,7 @@ class Pwospf(Packet):
             ByteField("version", 2), 
             ByteField("type", None),
             ShortField("packet_len", None), 
-            XIntField("router_id", None), 
+            IPField("router_id", None), 
             XIntField("area_id", None), 
             ShortField("checksum", None), 
             ShortField("autype", 0),
@@ -48,7 +48,7 @@ class Pwospf(Packet):
                 lambda pkt: pkt.type == TYPE_LSU
                 ),
             ConditionalField(
-                FieldListField("advertisements", [], LinkStateAdvertisement, count_from=lambda pkt: pkt.num_advertisements),
+                PacketListField("advertisements", [], LinkStateAdvertisement, count_from=lambda pkt: pkt.num_ads),
                 lambda pkt: pkt.type == TYPE_LSU
                 ),
             ]
@@ -58,7 +58,9 @@ class Pwospf(Packet):
             p = p[:2] + struct.pack("!H", length) + p[4:] 
         return p + pay 
 
-bind_layers(IP,Pwospf, proto=89) 
+bind_layers(IP,Pwospf,proto=89) 
+bind_layers(Pwospf,LinkStateAdvertisement,type=TYPE_LSU)
+bind_layers(LinkStateAdvertisement,LinkStateAdvertisement) 
 
 
 

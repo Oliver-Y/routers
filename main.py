@@ -4,6 +4,7 @@ from controller import P4Controller
 from my_topo import SingleSwitchTopo
 from mininet.cli import CLI 
 import time 
+from ipaddress import ip_address
 
 # Add three hosts. Port 1 (h1) is reserved for the CPU.
 N = 3
@@ -56,18 +57,25 @@ cpu1_intfs_mappings = {cpu1_subnets[0]:(cpu1_macs[0],cpu1_ips[0]), cpu1_subnets[
 cpu2_intfs_mappings = {cpu2_subnets[0]:(cpu2_macs[0],cpu2_ips[0]), cpu2_subnets[1]: (cpu2_macs[1], cpu2_ips[1])} 
 cpu3_intfs_mappings = {cpu3_subnets[0]:(cpu3_macs[0],cpu3_ips[0]), cpu3_subnets[1]: (cpu3_macs[1], cpu3_ips[1])} 
 #Initialize them individually 
-cpu1 = P4Controller(s1,cpu1_ips,cpu1_macs,cpu1_subnets,cpu1_intfs_mappings,1,1) 
+#Format Router ID --> IP address 
+cpu1_rid = "0.0.0.1" 
+cpu2_rid = "0.0.0.2" 
+cpu3_rid = "0.0.0.3" 
+
+cpu1 = P4Controller(s1,cpu1_ips,cpu1_macs,cpu1_subnets,cpu1_intfs_mappings,cpu1_rid,1) 
 #cpu2 = P4Controller(s2,cpu2_ips,cpu2_macs,cpu2_subnets,cpu2_intfs_mappings,2,1)  
-cpu3 = P4Controller(s3,cpu3_ips,cpu3_macs,cpu3_subnets,cpu3_intfs_mappings,3,1) 
+cpu3 = P4Controller(s3,cpu3_ips,cpu3_macs,cpu3_subnets,cpu3_intfs_mappings,cpu3_rid,1) 
 
 
 #cpu1.route_table["10.0.2.2"] = "10.0.3.2" 
-#cpu3.route_table["10.0.2.2"] = "10.0.2.2" 
+cpu1.routes.routes[("10.0.0.2",0xFFFFFFFF)] = "10.0.0.2" 
+cpu3.routes.routes[("10.0.2.2",0xFFFFFFFF)] = "10.0.2.2" 
+cpu1.routes.routes[("10.0.0.3",0xFFFFFFFF)] = "10.0.0.3" 
+cpu3.routes.routes[("10.0.2.3",0xFFFFFFFF)] = "10.0.2.3" 
 #cpu3.route_table["10.0.0.2"] = "10.0.3.0" 
-#cpu1.route_table["10.0.0.2"] = "10.0.0.2" 
 #cpu1.route_table["10.0.0.3"] = "10.0.0.3" 
 #mask1 = 0xFFFFFF00 
-#mask2 = 0xFFFFFFFF
+mask2 = 0xFFFFFFFF
 #s1.insertTableEntry(
 #    table_name="MyIngress.fwd_l3",
 #    match_fields={"hdr.ipv4.dstAddr": ["10.0.2.0",mask1]},
@@ -75,28 +83,36 @@ cpu3 = P4Controller(s3,cpu3_ips,cpu3_macs,cpu3_subnets,cpu3_intfs_mappings,3,1)
 #    action_params={"next_hop":"10.0.3.2"},
 #    priority = 1,
 #)
-#s1.insertTableEntry(
-#    table_name="MyIngress.fwd_l3",
-#    match_fields={"hdr.ipv4.dstAddr": ["10.0.0.2",mask2]},
-#    action_name="MyIngress.set_dst_ip",
-#    action_params={"next_hop":"10.0.0.2"},
-#    priority = 1,
-#)
-#
-#s1.insertTableEntry(
-#    table_name="MyIngress.fwd_l3",
-#    match_fields={"hdr.ipv4.dstAddr": ["10.0.0.3",mask2]},
-#    action_name="MyIngress.set_dst_ip",
-#    action_params={"next_hop":"10.0.0.3"},
-#    priority = 1,
-#)
-#s3.insertTableEntry(
-#    table_name="MyIngress.fwd_l3",
-#    match_fields={"hdr.ipv4.dstAddr": ["10.0.2.2",mask2]},
-#    action_name="MyIngress.set_dst_ip",
-#    action_params={"next_hop":"10.0.2.2"},
-#    priority = 1,
-#)
+
+s1.insertTableEntry(
+    table_name="MyIngress.fwd_l3",
+    match_fields={"hdr.ipv4.dstAddr": ["10.0.0.2",mask2]},
+    action_name="MyIngress.set_dst_ip",
+    action_params={"next_hop":"10.0.0.2"},
+    priority = 1,
+)
+
+s1.insertTableEntry(
+    table_name="MyIngress.fwd_l3",
+    match_fields={"hdr.ipv4.dstAddr": ["10.0.0.3",mask2]},
+    action_name="MyIngress.set_dst_ip",
+    action_params={"next_hop":"10.0.0.3"},
+    priority = 1,
+)
+s3.insertTableEntry(
+    table_name="MyIngress.fwd_l3",
+    match_fields={"hdr.ipv4.dstAddr": ["10.0.2.2",mask2]},
+    action_name="MyIngress.set_dst_ip",
+    action_params={"next_hop":"10.0.2.2"},
+    priority = 1,
+)
+s3.insertTableEntry(
+    table_name="MyIngress.fwd_l3",
+    match_fields={"hdr.ipv4.dstAddr": ["10.0.2.3",mask2]},
+    action_name="MyIngress.set_dst_ip",
+    action_params={"next_hop":"10.0.2.3"},
+    priority = 1,
+)
 #
 #s3.insertTableEntry(
 #    table_name="MyIngress.fwd_l3",

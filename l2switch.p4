@@ -19,6 +19,7 @@ const bit<16> TYPE_CPU_METADATA = 0x080a;
 const bit<8> PWOSPF_VERSION = 0x2; 
 const bit<8> PWOSPF_HELLO = 0x1; 
 const bit<8> PWOSPF_LSU = 0X4; 
+const bit<8> PWOSPF_PROTO = 0d89; 
 
 const bit<32> ALLSPFRouters = 0xe0000005; 
 
@@ -69,6 +70,7 @@ header pwospf_lsu_head_t{
     bit<16> ttl; 
     bit<32> num_ads; 
 }
+
 
 header pwospf_lsu_ads_t{
     varbit<960> ads; 
@@ -137,7 +139,7 @@ parser MyParser(packet_in packet,
         transition select(hdr.cpu_metadata.origEtherType) {
         TYPE_ARP: parse_arp;
         TYPE_IPV4: parse_ip; 
-                    default: accept;
+        default: accept;
                 }
     }
 
@@ -147,20 +149,20 @@ parser MyParser(packet_in packet,
     }
 
     state parse_ip{
-        log_msg("Parsing IP"); 
         packet.extract(hdr.ipv4); 
-        transition select(hdr.ipv4.dstAddr){
-            ALLSPFRouters: parse_pwospf_header;   
+        transition select(hdr.ipv4.protocol){
+            PWOSPF_PROTO: parse_pwospf_header; 
             default: accept; 
         }
     }   
     
     state parse_pwospf_header{
-        log_msg("Parsing Pwospf_header"); 
         packet.extract(hdr.pwospf_head); 
+        log_msg("Parsing Pwospf_header {}",{hdr.pwospf_head.type}); 
         transition select(hdr.pwospf_head.type){
             PWOSPF_HELLO: parse_pwospf_hello; 
             PWOSPF_LSU: parse_pwospf_lsu;  
+            default: accept;
         }   
     }
 
@@ -175,11 +177,13 @@ parser MyParser(packet_in packet,
    state parse_pwospf_lsu{
         packet.extract(hdr.pwospf_lsu_head); 
         verify(hdr.pwospf_lsu_head.num_ads >= 1, error.PWOSPF_Invalid); 
+        log_msg("Parsing Pwospf_Lsu_head"); 
         transition parse_pwospf_ads; 
    }   
 
    state parse_pwospf_ads{
-    packet.extract(hdr.pwospf_lsu_ads,(bit<32>)(hdr.pwospf_lsu_head.num_ads)) ;
+    packet.extract(hdr.pwospf_lsu_ads,(bit<32>)(hdr.pwospf_lsu_head.num_ads * 32));
+    log_msg("Parsing Pwospf_Lsu_ads"); 
     transition accept; 
    }   
 
@@ -240,7 +244,6 @@ control MyIngress(inout headers hdr,
         hdr.ethernet.srcAddr = hdr.ethernet.dstAddr;
         hdr.ethernet.dstAddr = dst_mac; 
     }
-
     table fwd_l3{
         key = {
             hdr.ipv4.dstAddr: ternary; 
@@ -281,6 +284,10 @@ control MyIngress(inout headers hdr,
         default_action = drop;
     }
 
+    action ipv4_forward(){
+    }
+
+
     apply {
         if (standard_metadata.ingress_port == CPU_PORT){
             cpu_meta_decap();
@@ -295,6 +302,10 @@ control MyIngress(inout headers hdr,
                 send_to_cpu(); 
             }
         }   
+        else if(hdr.pwospf_lsu_head.isValid() && standard_metadata.ingress_port != CPU_PORT){
+            log_msg("got lsu");  
+            send_to_cpu(); 
+        }
         else if(hdr.ipv4.isValid()){
             log_msg("ip detected"); 
             //First check to see if its a valid subnet. If not valid drop, otherwise, replace mac addresses based off of next hop IP 

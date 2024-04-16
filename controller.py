@@ -1,3 +1,11 @@
+#TODO: 
+#ARP Timeouts, updating ARP cache(might matter on link down) 
+#LInk Down, Link Up 
+#Diff Topology 
+#Local IP Router 
+#Default Gateway? 
+#Bookeeping functionality: Decrement TTL, IP checksum, Counters, ICMP echo + unreachable req
+
 from threading import Thread, Event
 from collections import deque
 from scapy.all import sendp
@@ -27,7 +35,8 @@ class OSPF_intfs():
         self.area_id = area_id
         self.timers = {}  
         self.flag = False  #Flag indicates if a change has been made
-        #Need to index this by Neighbor_ip? 
+        self.neighbor_id = [] 
+        self.neighbor_ip = [] 
     def __str__(self):
         return (f"OSPF Interface:\n"
                 f"  IP Address: {self.ip}\n"
@@ -39,18 +48,22 @@ class OSPF_intfs():
         if neighbor_ip in self.timers.keys(): 
             timer,nid = self.timers[neighbor_ip] 
             timer.cancel() 
-            timer = threading.Timer(3*self.helloint, self.timer_cb, args = [neighbor_ip]) 
+            timer = threading.Timer(3*self.helloint, self.timer_cb, args = [neighbor_ip, neighbor_id]) 
             self.timers[neighbor_ip] = (timer,nid)  
             timer.start()
         else: 
-            timer = threading.Timer(3*self.helloint,self.timer_cb, args = [neighbor_ip]) 
+            timer = threading.Timer(3*self.helloint,self.timer_cb, args = [neighbor_ip,neighbor_id]) 
             self.timers[neighbor_ip] = (timer,neighbor_id) 
             self.timers[neighbor_ip][0].start() 
             self.flag = True 
+            self.neighbor_ip.append(neighbor_ip) 
+            self.neighbor_id.append(neighbor_id) 
         #print(f"Intfs {self.subnet} --> {self.timers}") 
 
-    def timer_cb(self, neighbor_ip): 
+    def timer_cb(self, neighbor_ip, neighbor_id): 
         print(f"Timeout on {neighbor_ip}") 
+        self.neighbor_ip.remove(neighbor_ip) 
+        self.neighbor_id.remove(neighbor_id) 
         del self.timers[neighbor_ip] 
         self.flag = True 
 
@@ -70,13 +83,15 @@ class OSPF_intfs():
         return hello_pkt 
 
 class RouteTopology(): 
-    def __init__(self,sw,router_id,area_id,subnet_masks, intfs_ips ): 
+    def __init__(self,sw,router_id,area_id,subnet_masks,intfs_ips, intfs_ospf): 
         self.sw = sw 
+        self.router_id = router_id
+        self.area_id = area_id 
+
+        self.ospf_intfs = intfs_ospf 
         self.ips = intfs_ips #Your own interface IPs 
         self.id_to_ip = {} #Tracks the interface for the RID. 
         self.subnet_masks = subnet_masks #These are the subnets that I own  
-        self.router_id = router_id
-        self.area_id = area_id 
         self.adj = {router_id: []} #Maps RID --> list of RID. updated on Hello Packet 
         self.lsa = {router_id: self.subnet_masks} #Maps RID --> (subnet,mask) updated on LSU. If the subnet is on your own put a mask of /32 
         self.routes = {} #Maps Subnet+Mask --> Next Hop IP. Keep track of state of Dataplane table 
@@ -93,30 +108,47 @@ class RouteTopology():
         self.seq_num[rid] = pkt[Pwospf].seq 
         return False 
 
-
     #TODO: if change is detected in LSU, send LSU flood?
     def lsu_update(self,pkt): 
         rid = pkt[Pwospf].router_id 
+        rip = pkt[IP].src
         if self.check_seq(pkt): 
             return 
-        lsu_ads = pkt[Pwospf].advertisements
-        lsu_ad = pkt[Pwospf].advertisements[0]
-        lsu_num = pkt[Pwospf].num_ads 
-        for i in range(0,lsu_num): 
-            subnet = lsu_ad.subnet 
-            mask = lsu_ad.mask 
-            #Only append if not redundant. 
-            if (subnet,mask) not in self.lsa[lsu_ad.router_id]: 
-                self.lsa[lsu_ad.router_id].append((subnet,mask)) 
-            path = self.next_hop(subnet,mask) 
-            #print(f"{self.sw} --> Path: {path} to {subnet}/{mask}") 
-            #print(f"{self.sw} --> IPS: {self.ips}") 
-            if len(path) > 1: 
-                next_hop =self.id_to_ip[path[1]] 
-                mask = 0xFFFFFF00
-                self.routes[(subnet,mask)] = next_hop 
-                self.addRoute(next_hop,subnet,mask) 
-            lsu_ad = lsu_ad.payload 
+        #Check Link Status for this neighbor, has to be one of the interfaces  
+        valid = False  
+        change = False
+        for i in self.ospf_intfs: 
+            print(f"{self.sw}: {rid}, {i.neighbor_id}") 
+            print(f"{self.sw}: {rip}, {i.neighbor_ip}") 
+            if rid in i.neighbor_id and rip in i.neighbor_ip: 
+                valid = True 
+                break
+        if valid: 
+            lsu_ads = pkt[Pwospf].advertisements
+            lsu_ad = pkt[Pwospf].advertisements[0]
+            lsu_num = pkt[Pwospf].num_ads 
+            for i in range(0,lsu_num): 
+                lsu_rid = lsu_ad.router_id 
+                if lsu_rid not in self.lsa: 
+                    continue 
+                subnet = lsu_ad.subnet 
+                mask = lsu_ad.mask 
+                if (subnet,mask) not in self.lsa[lsu_rid]: 
+                    self.lsa[lsu_ad.router_id].append((subnet,mask)) 
+                    change = True 
+                path = self.next_hop(subnet,mask) 
+                print(f"{self.sw} --> {path} to {subnet}/{mask}") 
+                if len(path) > 1: 
+                    next_hop =self.id_to_ip[path[1]] 
+                    mask = 0xFFFFFF00
+                    key = (subnet,mask) 
+                    if key in self.routes: 
+                        self.modifyRoute(next_hop,subnet,mask) 
+                    else: 
+                        self.addRoute(next_hop,subnet,mask) 
+                    self.routes[key] = next_hop 
+                lsu_ad = lsu_ad.payload 
+        return change 
 
         #print(f"{self.sw}: {self.lsa}") 
     def discover_node(self,rid,ip): 
@@ -148,9 +180,13 @@ class RouteTopology():
                 self.adj[i].remove(rid) 
         del self.adj[rid] 
 
+    def modifyRoute(self,ip,subnet,mask):
+        self.delRoute(ip,subnet,mask) 
+        self.addRoute(ip,subnet,mask) 
+
     def addRoute(self,ip,subnet,mask):
         priority = 1 if mask == 0xFFFFFF00 else 2
-       # print(f"{self.sw}: {subnet},{mask} --> {ip}") 
+        print(f"{self.sw}: {subnet},{mask} --> {ip}") 
         self.sw.insertTableEntry(
             table_name="MyIngress.fwd_l3",
             match_fields={"hdr.ipv4.dstAddr": [subnet,mask]},
@@ -168,12 +204,6 @@ class RouteTopology():
             action_params={"next_hop":ip},
             priority = priority,
         )
-        self.subnet_masks = subnet_masks #These are the subnets that I own  
-        for s in self.subnet_masks: 
-            if ip_address(ip) in ip_network(s): 
-                self.routes[(ip,0xFFFFFFFF)] = ip 
-                self.addRoute(ip,ip,0xFFFFFFFF)
-        q = self.adj 
     def next_hop(self,subnet,mask): 
         def bfs_shortest_path(): 
             visited = set()
@@ -203,7 +233,6 @@ class P4Controller(Thread):
         for s in subnets: 
             net = ip_network(s) 
             subnet_masks.append((str(net.network_address),str(net.netmask))) 
-        self.routes = RouteTopology(sw,router_id,area_id,subnet_masks,ips) 
         self.stop_event = Event()
         #Control-plane datastructures
         self.macs = macs 
@@ -223,11 +252,17 @@ class P4Controller(Thread):
             self.ospf_intfs.append(intfs) 
             self.ospf_hello_cb(HELLO_INT,intfs,i) 
 
-    def lsu_flood(self): 
-        pass 
-    def hello_send(self): 
-        #Construct Hello Packet 
-        pass 
+        self.lsu_timer = threading.Timer(3*lsuint,self.pwospf_lsu_flood_wrapper) 
+        self.lsu_timer.start() 
+        self.routes = RouteTopology(sw,router_id,area_id,subnet_masks,ips,self.ospf_intfs) 
+
+    #Periodic flooding
+    def pwospf_lsu_flood_wrapper(self): 
+        self.pwospf_lsu_flood() 
+        self.lsu_timer = threading.Timer(3*self.lsuint,self.pwospf_lsu_flood_wrapper) 
+        self.lsu_timer.start() 
+
+
     def ospf_lsu_cb(self,interval): 
         threading.Timer(interval,self.ospf_lsu_cb, args=[interval]).start() 
         self.lsu_flood() 
@@ -237,8 +272,6 @@ class P4Controller(Thread):
         src_mac = self.macs[interface_index] 
         pkt = interface.build_packet(src_mac) 
         self.send(pkt) 
-    
-    
     def addArpEntry(self, ip, mac): 
         if ip in self.arp.keys(): 
             return 
@@ -261,7 +294,6 @@ class P4Controller(Thread):
                 match_fields={'hdr.ethernet.dstAddr': [mac]},
                 action_name='MyIngress.set_egr',
                 action_params={'port': port})
-
     def req_to_reply(self, pkt): 
         subnet = None 
         dst_ip = pkt[ARP].pdst
@@ -347,8 +379,8 @@ class P4Controller(Thread):
         return pkt[Pwospf].area_id != self.area_id or pkt[Pwospf].router_id == self.router_id 
 
     def pwospf_lsu_flood(self): 
+        print("Flood") 
         neighbor_routers = self.routes.adj[self.router_id] 
-        #TODO: LSU_ads here needs to be the entire table not just your own
         lsu_ads = [] 
         for rid in self.routes.lsa: 
             for v in self.routes.lsa[rid]: 
@@ -373,9 +405,14 @@ class P4Controller(Thread):
                 self.send(lsu_pkt) 
         self.host_seq += 1
 
-    def handlePwospf_lsu(self,pkt): 
-        self.routes.lsu_update(pkt) 
 
+    def handlePwospf_lsu(self,pkt): 
+        if self.routes.lsu_update(pkt): 
+            #Reset timer for lsu_flood_wrapper
+            self.lsu_timer.cancel() 
+            self.lsu_timer = threading.Timer(3*self.lsuint,self.pwospf_lsu_flood_wrapper) 
+            self.lsu_timer.start() 
+            self.pwospf_lsu_flood() 
 
     def handlePwospf_hello(self,pkt): 
         if not self.pwospf_drop(pkt): 
@@ -386,10 +423,12 @@ class P4Controller(Thread):
                     intfs.update_status(rid,incoming_ip) 
                 if intfs.lsu_needed(): 
                     self.routes.discover_node(rid,incoming_ip) #When we discover a node, if its not in our route table add a direct route  
+                    self.lsu_timer.cancel() 
+                    self.lsu_timer = threading.Timer(3*self.lsuint,self.pwospf_lsu_flood_wrapper) 
+                    self.lsu_timer.start() 
                     self.pwospf_lsu_flood() 
         else: 
             print("PWOSPF packet dropped") 
-
         
     def handlePwospf(self,pkt): 
         if pkt[Pwospf].type == TYPE_HELLO: 
@@ -416,7 +455,6 @@ class P4Controller(Thread):
         elif IP in pkt: 
             print("IP on" + str(self.sw))
             self.handleIP(pkt) 
-
 
     def send(self, *args, **override_kwargs):
         pkt = args[0]

@@ -158,7 +158,6 @@ parser MyParser(packet_in packet,
     
     state parse_pwospf_header{
         packet.extract(hdr.pwospf_head); 
-        log_msg("Parsing Pwospf_header {}",{hdr.pwospf_head.type}); 
         transition select(hdr.pwospf_head.type){
             PWOSPF_HELLO: parse_pwospf_hello; 
             PWOSPF_LSU: parse_pwospf_lsu;  
@@ -168,7 +167,6 @@ parser MyParser(packet_in packet,
 
 
    state parse_pwospf_hello{
-        log_msg("Parsing Pwospf_Hello"); 
         packet.extract(hdr.pwospf_hello); 
         transition accept; 
    }
@@ -177,13 +175,11 @@ parser MyParser(packet_in packet,
    state parse_pwospf_lsu{
         packet.extract(hdr.pwospf_lsu_head); 
         verify(hdr.pwospf_lsu_head.num_ads >= 1, error.PWOSPF_Invalid); 
-        log_msg("Parsing Pwospf_Lsu_head"); 
         transition parse_pwospf_ads; 
    }   
 
    state parse_pwospf_ads{
     packet.extract(hdr.pwospf_lsu_ads,(bit<32>)(hdr.pwospf_lsu_head.num_ads * 32));
-    log_msg("Parsing Pwospf_Lsu_ads"); 
     transition accept; 
    }   
 
@@ -191,13 +187,21 @@ parser MyParser(packet_in packet,
 }
 
 control MyVerifyChecksum(inout headers hdr, inout metadata meta) {
-    apply { }
+    apply {
+
+        verify_checksum(hdr.ipv4.isValid(), { hdr.ipv4.version, hdr.ipv4.ihl, hdr.ipv4.diffserv, hdr.ipv4.totalLen, hdr.ipv4.identification, hdr.ipv4.flags, hdr.ipv4.fragOffset, hdr.ipv4.ttl, hdr.ipv4.protocol, hdr.ipv4.srcAddr, hdr.ipv4.dstAddr }, hdr.ipv4.hdrChecksum, HashAlgorithm.csum16);
+
+ }
 }
 
 control MyIngress(inout headers hdr,
         inout metadata meta,
         inout standard_metadata_t standard_metadata) {
     ip4Addr_t global_next_hop; 
+    register<bit<32>>(size = 1) ip_counter;
+    register<bit<32>>(size = 1) arp_counter;
+    register<bit<32>>(size = 1) cpu_counter;
+
 
     action drop() {
         mark_to_drop(standard_metadata);
@@ -212,7 +216,6 @@ control MyIngress(inout headers hdr,
     }
 
     action cpu_meta_encap(){
-        log_msg("Encap"); 
         hdr.cpu_metadata.setValid();
         hdr.cpu_metadata.origEtherType = hdr.ethernet.etherType;
         hdr.cpu_metadata.srcPort = (bit<16>)standard_metadata.ingress_port;
@@ -284,13 +287,13 @@ control MyIngress(inout headers hdr,
         default_action = drop;
     }
 
-    action ipv4_forward(){
-    }
-
 
     apply {
         if (standard_metadata.ingress_port == CPU_PORT){
             cpu_meta_decap();
+            bit<32> temp;  
+            cpu_counter.read(temp,0); 
+            log_msg("Cpu Counter {}",{temp}); 
         }
         if(hdr.pwospf_hello.isValid()){
             if(standard_metadata.ingress_port == CPU_PORT){
@@ -299,32 +302,69 @@ control MyIngress(inout headers hdr,
             }
             else{
                 log_msg("got hello");  
+                bit<32> temp;  
+                cpu_counter.read(temp,0); 
+                cpu_counter.write(0, temp + 1); 
                 send_to_cpu(); 
             }
         }   
         else if(hdr.pwospf_lsu_head.isValid() && standard_metadata.ingress_port != CPU_PORT){
             //Always send LSU up to the CPU. If the CPU sends it back that just means 
             log_msg("got lsu");  
+            bit<32> temp;  
+            cpu_counter.read(temp,0); 
+            cpu_counter.write(0, temp + 1); 
             send_to_cpu(); 
         }
         else if(hdr.ipv4.isValid()){
+            bit<32> ip_temp;  
+            ip_counter.read(ip_temp,0); 
+            ip_counter.write(0, ip_temp + 1); 
             log_msg("ip detected"); 
             //First check to see if its a valid subnet. If not valid drop, otherwise, replace mac addresses based off of next hop IP 
             if(fwd_l3.apply().hit){
                 if(arp.apply().hit){
                     log_msg("ether on IP");
+                    //Decrement TTL 
+                    hdr.ipv4.ttl = hdr.ipv4.ttl - 1;
                     fwd_l2.apply(); 
+                }
+                else{
+                    bit<32> temp;  
+                    cpu_counter.read(temp,0); 
+                    cpu_counter.write(0, temp + 1); 
                 }
             }
         }
         else if(hdr.arp.isValid() && standard_metadata.ingress_port != CPU_PORT){
+            bit<32> temp;  
+            cpu_counter.read(temp,0); 
+            cpu_counter.write(0, temp + 1); 
+            arp_counter.read(temp,0); 
+            arp_counter.write(0, temp + 1); 
             log_msg("arp detected");  
             send_to_cpu(); 
         }
         else if (hdr.ethernet.isValid()) {
+            if(hdr.arp.isValid() && standard_metadata.ingress_port == CPU_PORT){
+                bit<32> temp; 
+                arp_counter.read(temp,0); 
+                arp_counter.write(0, temp + 1); 
+                log_msg("Outgoing ARP"); 
+                }
             fwd_l2.apply();
         }
 
+        if(hdr.ipv4.isValid()){
+            bit<32> ip_temp;  
+            ip_counter.read(ip_temp,0); 
+            log_msg("IP Counter {}",{ip_temp}); 
+        }
+        if(hdr.arp.isValid()){
+                bit<32> temp; 
+                arp_counter.read(temp,0); 
+            log_msg("Arp Counter {}",{temp}); 
+        }
     }
 }
 
@@ -335,7 +375,14 @@ control MyEgress(inout headers hdr,
 }
 
 control MyComputeChecksum(inout headers  hdr, inout metadata meta) {
-    apply { }
+    apply {
+        update_checksum(hdr.ipv4.isValid(), { hdr.ipv4.version, hdr.ipv4.ihl, hdr.ipv4.diffserv, hdr.ipv4.totalLen, hdr.ipv4.identification, hdr.ipv4.flags, hdr.ipv4.fragOffset, hdr.ipv4.ttl, hdr.ipv4.protocol, hdr.ipv4.srcAddr, hdr.ipv4.dstAddr }, hdr.ipv4.hdrChecksum, HashAlgorithm.csum16);
+
+ }
+
+
+
+
 }
 
 control MyDeparser(packet_out packet, in headers hdr) {
